@@ -1,0 +1,13 @@
+{
+  "name": "mission-tracker",
+  "description": "Mission Tracker: a live task tree Claude keeps up to date",
+  "owner": {
+    "name": "Edan Yarok"
+  },
+  "plugins": [
+    {
+      "name": "mission-tracker",
+      "source": "./"
+    }
+  ]
+}

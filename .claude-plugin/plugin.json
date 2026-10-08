@@ -1,0 +1,9 @@
+{
+  "name": "mission-tracker",
+  "version": "0.1.0",
+  "description": "A live mission tree of stages, tasks and subtasks that Claude keeps up to date while you work",
+  "types": "./types/index.d.ts",
+  "author": {
+    "name": "Edan Yarok"
+  }
+}
