@@ -87,10 +87,11 @@ test('the tool updates the pane and a press ticks an item', async ($, on) => {
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ ...PANE, surface })
     expect(await ui.find({ type: 'Text', text: /0\/2/ })).toBeDefined()
-    await ui.press({ key: 'tick-2' })
-    await ui.press({ key: 'tick-2' })
-    expect(await ui.find({ type: 'Text', text: /1\/2/ })).toBeDefined()
-    await ui.press({ key: 'tick-2' })
+    expect(await ui.find({ type: 'Text', text: 'to do' })).toBeDefined()
+    await ui.press({ key: 'next-2' })
+    await ui.press({ key: 'next-2' })
+    expect(await ui.find({ type: 'Text', text: '50%' })).toBeDefined()
+    await ui.press({ key: 'next-2' })
     await ui.unmount()
   }
 })
@@ -111,4 +112,26 @@ test('the system prompt carries the current tree', async ($, on) => {
   const composed = await $.prompt.compose({ model: 'claude-sonnet-5-5', promptModel: 'claude-sonnet-5-5', surfaces: ['terminal'], tools: [], outputStyle: null, traits: [] })
   const section = composed.sections.find(s => s.id === 'mission-tracker:mission')
   expect(section?.text).toContain('[~] #1 Carry over')
+})
+
+test('a Hebrew mission draws right-to-left with a Hebrew legend and folds finished stages', async ($, on) => {
+  mock.store(on)
+  mock.clock(on, { now: 10_000 })
+  world(on)
+  await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: true })
+  await $.tool.call({
+    tool: TOOL,
+    ops: [
+      { op: 'start', title: 'חבילה E' },
+      { op: 'add', title: 'שלב א', ref: 'a' },
+      { op: 'add', title: 'משימה', parent: 'a', status: 'done' },
+      { op: 'add', title: 'שלב ב' },
+    ],
+  } as never)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await ui.find({ type: 'Text', text: 'לביצוע' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^משימה$/ })).toBeUndefined()
+  await ui.press({ key: 'toggle-done' })
+  expect(await ui.find({ type: 'Text', text: /^משימה$/ })).toBeDefined()
+  await ui.unmount()
 })

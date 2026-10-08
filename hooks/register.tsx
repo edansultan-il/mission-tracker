@@ -3,9 +3,9 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import type { Item, Mission } from '../types'
 import {
-  GLYPH,
   STATUSES,
   applyOps,
+  childrenOf,
   currentFocus,
   cycleStatus,
   effectiveStatus,
@@ -13,6 +13,7 @@ import {
   newMission,
   progress,
   renderText,
+  subtreeProgress,
   walk,
 } from './tree'
 import type { Op } from './tree'
@@ -22,15 +23,36 @@ const TOOL = 'mcp__mission-tracker__mission'
 const ARCHIVE_SIZE = 20
 
 const missionAtom = atom({ plugin: 'mission-tracker', key: 'mission' } as const, null)
-const hideDoneAtom = atom({ plugin: 'mission-tracker', key: 'hideDone' } as const, false)
+const expandDoneAtom = atom({ plugin: 'mission-tracker', key: 'expandDone' } as const, false)
 
-const COLOR = {
-  todo: undefined,
-  doing: 'suggestion',
-  done: 'success',
-  blocked: 'warning',
-  cancelled: 'inactive',
+// What the pane draws. The model still reads the ASCII marks from renderText.
+const MARK = { todo: '○', doing: '◐', done: '✓', blocked: '!', cancelled: '✕' } as const
+const MARK_COLOR = { todo: 'inactive', doing: 'suggestion', done: 'success', blocked: 'warning', cancelled: 'inactive' } as const
+const TEXT_COLOR = { todo: undefined, doing: 'suggestion', done: undefined, blocked: 'warning', cancelled: undefined } as const
+
+const WORDS = {
+  en: {
+    legend: { todo: 'to do', doing: 'in progress', done: 'done', blocked: 'blocked', cancelled: 'dropped' },
+    next: { todo: 'start', doing: 'mark done', done: 'reopen', blocked: 'unblock', cancelled: 'restore' },
+    hint: 'Hover a task to change it',
+    showDone: 'Show finished',
+    collapseDone: 'Fold finished',
+    new: 'NEW',
+    empty: 'No tasks yet.',
+  },
+  he: {
+    legend: { todo: 'לביצוע', doing: 'בתהליך', done: 'הושלם', blocked: 'חסום', cancelled: 'בוטל' },
+    next: { todo: 'התחל', doing: 'סמן כבוצע', done: 'פתח מחדש', blocked: 'שחרר', cancelled: 'שחזר' },
+    hint: 'מעבר עם העכבר על משימה משנה סטטוס',
+    showDone: 'הצג שהושלמו',
+    collapseDone: 'קפל שהושלמו',
+    new: 'חדש',
+    empty: 'אין משימות עדיין.',
+  },
 } as const
+
+// A Hebrew title turns the whole pane right-to-left.
+const isRtl = (m: Mission) => /[\u0590-\u05FF]/.test(m.title)
 
 const GUIDANCE = `# Mission tracker
 
@@ -115,12 +137,6 @@ async function mutate($: $, change: (m: Mission | null) => Mission | null): Prom
     void $.ui.toast(`Mission complete: ${after.title} 🎉`)
   }
   return after
-}
-
-function bar(done: number, total: number, width: number): string {
-  if (total === 0) return ''
-  const filled = Math.round((done / total) * width)
-  return '█'.repeat(filled) + '░'.repeat(width - filled)
 }
 
 export const register: Register = on => {
@@ -239,7 +255,7 @@ export const register: Register = on => {
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text, Button } = $.ui.resolve(e)
     const m = await read($, missionAtom)
-    const hideDone = await read($, hideDoneAtom)
+    const expandDone = await read($, expandDoneAtom)
 
     if (m === null) {
       return (
@@ -250,16 +266,28 @@ export const register: Register = on => {
       )
     }
 
+    const rtl = isRtl(m)
+    const t = rtl ? WORDS.he : WORDS.en
+    const dir = rtl ? 'row-reverse' : 'row'
+    const align = rtl ? 'flex-end' : 'flex-start'
     const p = progress(m)
-    const width = Math.max(8, Math.min(24, e.props.bodyColumns - 12))
-    const rows: { item: Item; depth: number }[] = []
+    const percent = p.total === 0 ? 0 : Math.round((p.done / p.total) * 100)
+    const width = Math.max(8, Math.min(28, e.props.bodyColumns - 16))
+    const filled = p.total === 0 ? 0 : Math.round((p.done / p.total) * width)
+
+    // Finished groups fold to one line unless the person expands them.
+    const rows: { item: Item; depth: number; isFolded: boolean }[] = []
+    let canFold = false
     walk(m, (item, depth) => {
       const shown = effectiveStatus(m, item)
-      if (hideDone && (shown === 'done' || shown === 'cancelled')) return false
-      rows.push({ item, depth })
+      const hasKids = childrenOf(m, item.id).length > 0
+      const isFolded = hasKids && shown === 'done' && !expandDone
+      if (hasKids && shown === 'done') canFold = true
+      rows.push({ item, depth, isFolded })
+      return !isFolded
     })
 
-    const cycle = (id: number) =>
+    const advance = (id: number) =>
       mutate($, current =>
         current === null
           ? current
@@ -267,44 +295,104 @@ export const register: Register = on => {
       )
 
     return (
-      <Box flexDirection="column">
-        <Text bold wrap="truncate-end">🎯 {m.title}</Text>
-        <Box flexDirection="row" gap={1}>
-          <Text color="success">{bar(p.done, p.total, width)}</Text>
-          <Text>{p.done}/{p.total}</Text>
+      <Box flexDirection="column" alignItems={align}>
+        <Box flexDirection={dir} gap={1}>
+          <Text>🎯</Text>
+          <Text bold>{m.title}</Text>
         </Box>
-        <Box flexDirection="row" marginBottom={1}>
-          <Button
-            key="toggle-done"
-            plain
-            dimColor
-            label={hideDone ? 'Show done' : 'Hide done'}
-            onPress={() => update($, hideDoneAtom, v => !v)}
-          />
+        <Box flexDirection={dir} gap={1} marginTop={1}>
+          <Box flexDirection={dir}>
+            <Text color="success">{'━'.repeat(filled)}</Text>
+            <Text dimColor>{'━'.repeat(width - filled)}</Text>
+          </Box>
+          <Text bold>{percent}%</Text>
+          <Text dimColor>
+            {p.done}/{p.total}
+          </Text>
         </Box>
-        {m.items.length === 0 && <Text dimColor>No tasks yet.</Text>}
-        {rows.map(({ item, depth }) => {
-          const shown = effectiveStatus(m, item)
-          const isNew = item.addedAt > m.seenAt
-          return (
-            <Box key={`row-${item.id}`} flexDirection="row" paddingLeft={depth * 2} gap={1}>
-              <Button key={`tick-${item.id}`} plain label={GLYPH[shown]} onPress={() => cycle(item.id)} />
-              <Box flexDirection="column" flexShrink={1}>
-                <Text
-                  color={COLOR[shown]}
-                  dimColor={shown === 'cancelled'}
-                  strikethrough={shown === 'cancelled'}
-                  bold={depth === 0}
-                >
-                  {item.title}
-                  {isNew ? ' ' : ''}
-                  {isNew && <Text color="claude">NEW</Text>}
+
+        <Box flexDirection="column" marginTop={1} alignItems={align}>
+          {m.items.length === 0 && <Text dimColor>{t.empty}</Text>}
+          {rows.map(({ item, depth, isFolded }, index) => {
+            const shown = effectiveStatus(m, item)
+            const kids = childrenOf(m, item.id).length > 0
+            const sub = kids ? subtreeProgress(m, item.id) : null
+            const isNew = item.addedAt > m.seenAt
+            const isStage = depth === 0
+            return (
+              <Box
+                key={`row-${item.id}`}
+                flexDirection={dir}
+                gap={1}
+                paddingLeft={rtl ? 0 : depth * 2}
+                paddingRight={rtl ? depth * 2 : 0}
+                marginTop={isStage && index > 0 ? 1 : 0}
+              >
+                <Text color={MARK_COLOR[shown]} bold>
+                  {MARK[shown]}
                 </Text>
-                {item.note && <Text dimColor>{item.note}</Text>}
+                <Box flexDirection="column" flexShrink={1} alignItems={align}>
+                  <Box flexDirection={dir} gap={1}>
+                    <Text
+                      bold={isStage}
+                      color={TEXT_COLOR[shown]}
+                      dimColor={shown === 'done' || shown === 'cancelled'}
+                      strikethrough={shown === 'cancelled'}
+                    >
+                      {item.title}
+                    </Text>
+                    {sub && (
+                      <Text dimColor>
+                        {sub.done}/{sub.total}
+                        {isFolded ? ' ▸' : ''}
+                      </Text>
+                    )}
+                    {isNew && (
+                      <Text color="claude" bold>
+                        {t.new}
+                      </Text>
+                    )}
+                    {!kids && (
+                      <Box display="none" hover={{ display: 'flex' }}>
+                        <Button key={`next-${item.id}`} plain dimColor label={`› ${t.next[item.status]}`} onPress={() => advance(item.id)} />
+                      </Box>
+                    )}
+                  </Box>
+                  {item.note && (
+                    <Text dimColor italic>
+                      {item.note}
+                    </Text>
+                  )}
+                </Box>
               </Box>
+            )
+          })}
+        </Box>
+
+        <Box flexDirection={dir} flexWrap="wrap" columnGap={2} marginTop={1}>
+          {STATUSES.map(status => (
+            <Box key={`legend-${status}`} flexDirection={dir} gap={1}>
+              <Text color={MARK_COLOR[status]} bold>
+                {MARK[status]}
+              </Text>
+              <Text dimColor>{t.legend[status]}</Text>
             </Box>
-          )
-        })}
+          ))}
+        </Box>
+        <Box flexDirection={dir} gap={2}>
+          <Text dimColor italic>
+            {t.hint}
+          </Text>
+          {canFold && (
+            <Button
+              key="toggle-done"
+              plain
+              dimColor
+              label={expandDone ? t.collapseDone : t.showDone}
+              onPress={() => update($, expandDoneAtom, v => !v)}
+            />
+          )}
+        </Box>
       </Box>
     )
   })

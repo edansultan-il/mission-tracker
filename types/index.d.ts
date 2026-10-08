@@ -19,6 +19,6 @@ export type Mission = {
 
 declare module 'claude-code' {
   interface PluginState {
-    'mission-tracker': { mission: Mission | null; hideDone: boolean }
+    'mission-tracker': { mission: Mission | null; expandDone: boolean }
   }
 }

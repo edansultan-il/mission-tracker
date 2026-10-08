@@ -63,6 +63,14 @@ export function progress(m: Mission): { done: number; total: number } {
   return { done: leaves.filter(item => item.status === 'done').length, total: leaves.length }
 }
 
+export function subtreeProgress(m: Mission, id: number): { done: number; total: number } {
+  const ids = descendantIds(m, id)
+  ids.delete(id)
+  const live = m.items.filter(item => ids.has(item.id) && item.status !== 'cancelled')
+  const leaves = live.filter(item => !live.some(other => other.parent === item.id))
+  return { done: leaves.filter(item => item.status === 'done').length, total: leaves.length }
+}
+
 export function isComplete(m: Mission | null): boolean {
   if (m === null) return false
   const p = progress(m)
