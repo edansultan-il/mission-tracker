@@ -19,11 +19,14 @@ const PANE = {
 } as const
 
 // What the engine answers beneath the plugin in a real session.
-function world(on: On) {
+function world(on: On, opens: string[] = []) {
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('tool.register', ($, e) => ({ value: { tool: `mcp__mission-tracker__${e.name}` } }))
   on('command.register', ($, e) => ({ value: { command: e.name } }))
-  on('ui.open', () => ({ value: { isPlaced: true as const } }))
+  on('ui.open', ($, e) => {
+    opens.push(e.id)
+    return { value: { isPlaced: true as const } }
+  })
   on('ui.close', () => ({ value: undefined }))
   on('ui.status', () => ({ value: undefined }))
   on('ui.toast', () => ({ value: undefined }))
@@ -134,4 +137,34 @@ test('a Hebrew mission draws right-to-left with a Hebrew legend and folds finish
   await ui.press({ key: 'toggle-done' })
   expect(await ui.find({ type: 'Text', text: /^משימה$/ })).toBeDefined()
   await ui.unmount()
+})
+
+test('the pane reopens for an unfinished mission until the person closes it, and /mission brings it back', async ($, on) => {
+  const opens: string[] = []
+  mock.store(on, {
+    'mission:/work': {
+      title: 'Open work',
+      startedAt: 1,
+      seenAt: 1,
+      nextId: 2,
+      items: [{ id: 1, parent: null, title: 'Task', status: 'todo', addedAt: 1 }],
+      paneDismissed: true,
+    },
+  })
+  mock.clock(on, { now: 5 })
+  world(on, opens)
+
+  await $.session.start({ cwd: '/work', surface: 'desktop', isInteractive: true })
+  expect(opens).toHaveLength(0)
+
+  await $.command.run({ command: 'mission', args: '' } as never)
+  const afterCommand = opens.length
+  expect(afterCommand).toBeGreaterThan(0)
+
+  await $.tool.call({ tool: TOOL, ops: [{ op: 'add', title: 'Another' }] } as never)
+  expect(opens.length).toBeGreaterThan(afterCommand)
+
+  const beforeDone = opens.length
+  await $.tool.call({ tool: TOOL, ops: [{ op: 'update', id: 1, status: 'done' }, { op: 'update', id: 2, status: 'done' }] } as never)
+  expect(opens.length).toBe(beforeDone)
 })

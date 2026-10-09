@@ -15,6 +15,8 @@ export type Mission = {
   seenAt: number
   nextId: number
   items: Item[]
+  // Set when the person closes the pane themselves; /mission clears it.
+  paneDismissed?: boolean
 }
 
 declare module 'claude-code' {

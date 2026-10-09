@@ -139,6 +139,17 @@ async function mutate($: $, change: (m: Mission | null) => Mission | null): Prom
   return after
 }
 
+// The pane stays up for an unfinished mission until the person closes it themselves.
+async function keepOpen($: $): Promise<void> {
+  const m = await read($, missionAtom)
+  if (m === null || m.paneDismissed || isComplete(m)) return
+  await $.ui.open({ id: PANE, title: 'Mission' })
+}
+
+async function setDismissed($: $, isDismissed: boolean): Promise<void> {
+  await mutate($, m => (m === null || Boolean(m.paneDismissed) === isDismissed ? m : { ...m, paneDismissed: isDismissed }))
+}
+
 export const register: Register = on => {
   let addedThisTurn = 0
 
@@ -167,7 +178,7 @@ export const register: Register = on => {
     })
 
     void $.ui.status(statusLine(m))
-    if (m !== null && e.isInteractive) void $.ui.open({ id: PANE, title: 'Mission' })
+    if (e.isInteractive) void keepOpen($)
 
     return next(e)
   })
@@ -188,7 +199,7 @@ export const register: Register = on => {
     if (before !== null && after !== null && before.startedAt !== after.startedAt) await archive($, before)
 
     addedThisTurn += outcome.added
-    if (after !== null) void $.ui.open({ id: PANE, title: 'Mission' })
+    void keepOpen($)
 
     const problems = outcome.errors.length ? `\n\nNot applied:\n- ${outcome.errors.join('\n- ')}` : ''
     return { result: renderText(after) + problems }
@@ -205,6 +216,7 @@ export const register: Register = on => {
     addedThisTurn = 0
     const now = await $.clock.now()
     if ((await read($, missionAtom)) !== null) await mutate($, m => (m ? { ...m, seenAt: now } : m))
+    void keepOpen($)
     return next(e)
   })
 
@@ -213,6 +225,13 @@ export const register: Register = on => {
       void $.ui.toast(`Mission: ${addedThisTurn} new item${addedThisTurn === 1 ? '' : 's'} added`)
       addedThisTurn = 0
     }
+    void keepOpen($)
+    return next(e)
+  })
+
+  // Closing the pane by hand is the one thing that keeps it closed.
+  on('ui.close', async ($, e, next) => {
+    if (e.id === PANE && e.origin.kind === 'person') await setDismissed($, true)
     return next(e)
   })
 
@@ -247,9 +266,10 @@ export const register: Register = on => {
       return { text: `Archived mission: ${m.title}` }
     }
 
+    await setDismissed($, false)
     await $.ui.open({ id: PANE, title: 'Mission' })
     const m = await read($, missionAtom)
-    return { text: m ? 'Mission pane opened.' : 'No active mission. Start one with /mission new <title>, or ask Claude to track your work.' }
+    return { text: m ? 'Mission pane opened. It stays open until the mission is done or you close it.' : 'No active mission. Start one with /mission new <title>, or ask Claude to track your work.' }
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
