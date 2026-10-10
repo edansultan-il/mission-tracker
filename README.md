@@ -1,45 +1,55 @@
 # Mission Tracker
 
-A Claude Code mod that keeps a live tree of your mission (stages, tasks, subtasks) in a side pane, and has Claude update it as the work changes.
+A Claude Code mod that keeps live mission trees (stages, tasks, subtasks) in a side pane, and has Claude keep them up to date while the work changes.
 
 ## What it does
 
-- **Side pane** with the mission title, a progress bar and the full tree. Click `[ ]` to cycle an item: todo → doing → done.
-- **Claude keeps it current.** Claude gets a `mission` tool plus standing instructions to add new stages and subtasks the moment they come up, and to set statuses as work moves.
-- **Nothing disappears quietly.** Items Claude added since your last message are tagged `NEW`. Dropped work shows as cancelled (struck through) instead of vanishing.
-- **Status line:** `🎯 Mission · 5/12 · now: <current task>`
-- **Survives restarts and compaction.** The tree is saved per project folder, and Claude sees the current tree on every turn.
-- **Toasts** when new items get added and when the mission is complete.
+- **One mission per chat, many side by side.** Starting a mission in one chat never touches another chat's.
+- **Sub-missions.** A mission can deliver one item of a bigger mission (E1 under "Package E"). The parent shows the sub-mission's progress on that item and ticks it when the sub-mission finishes. Each chat sees the other's changes within seconds.
+- **Claude keeps it current.** It adds stages and subtasks the moment they come up, sets statuses as it works, and can update an item in another mission ("E4 is done").
+- **A clean pane.** Progress bar, the task in progress, colored status marks with a legend, due dates (red when overdue), owners, finished stages folded to one line, and right-to-left layout for Hebrew missions.
+- **All missions view.** Every active mission in the folder, sub-missions nested under their parents, with buttons to open one here or restore an archived one.
+- **Stays open** while a mission is unfinished, until you close the pane yourself.
 
-Status marks: `[ ]` todo · `[~]` doing · `[x]` done · `[!]` blocked · `[-]` cancelled
+Status marks: `○` to do · `◐` in progress · `✓` done · `!` blocked · `✕` dropped
 
 ## Commands
 
 | Command | What it does |
 | --- | --- |
 | `/mission` | Open the pane |
-| `/mission new <title>` | Start a new mission (the old one is archived) |
-| `/mission add <task>` | Add a top-level task yourself |
-| `/mission show` | Print the tree into the chat |
-| `/mission archive` | Archive the current mission and close the pane |
+| `/mission new <title>` | Start a mission for this chat |
+| `/mission join <name>` | Attach this chat to an existing mission |
+| `/mission list` | List active and archived missions |
+| `/mission report` | Print a handoff summary: done, in progress, blocked, next up |
+| `/mission add <task>` | Add a task yourself |
+| `/mission show` | Print this chat's tree |
+| `/mission archive [name]` | Put a mission away |
+| `/mission restore <name>` | Bring an archived mission back to this chat |
 
-Or just tell Claude: "track this as a mission".
+Or just tell Claude: "track this as a mission", or "this is E1 of Package E".
 
 ## Install
 
-From a terminal session of Claude Code:
-
 ```
-/plugin install mission-tracker --marketplace <owner>/<repo>
+/plugin install mission-tracker --marketplace edansultan-il/mission-tracker
 ```
 
-Answer `y` to add the marketplace, then pick the user scope. Once installed at the user scope it also loads in the desktop app's Code tab.
-
-To try it from a local folder without installing:
+Or from PowerShell or any shell:
 
 ```
-claude --plugin-dir /path/to/mission-tracker
+claude plugin marketplace add edansultan-il/mission-tracker
+claude plugin install mission-tracker@mission-tracker
 ```
+
+To update later:
+
+```
+claude plugin marketplace update mission-tracker
+claude plugin update mission-tracker@mission-tracker
+```
+
+Then run `/reload-plugins` in open chats.
 
 ## Development
 
