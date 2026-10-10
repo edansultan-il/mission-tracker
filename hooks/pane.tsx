@@ -28,7 +28,7 @@ const WORDS = {
     showDone: 'Show finished',
     collapseDone: 'Fold finished',
     allMissions: 'All missions',
-    missionsHere: 'Missions in this folder',
+    missionsHere: 'All missions',
     pickHint: 'Pick a mission for this chat, or ask Claude to start one.',
     none: 'No active missions yet.',
     thisChat: 'this chat',
@@ -47,7 +47,7 @@ const WORDS = {
     showDone: 'הצג שהושלמו',
     collapseDone: 'קפל שהושלמו',
     allMissions: 'כל המשימות',
-    missionsHere: 'המשימות בתיקייה',
+    missionsHere: 'כל המשימות',
     pickHint: 'בחר משימה לצ׳אט הזה, או בקש מ-Claude לפתוח אחת.',
     none: 'אין עדיין משימות פעילות.',
     thisChat: 'הצ׳אט הזה',
@@ -71,7 +71,9 @@ export type PaneActions = {
 
 type Layout = { columns: number; now: number; expandDone: boolean }
 
-const HEBREW = /[֐-׿]/
+const HEBREW = /[\u0590-\u05FF]/
+
+const projectName = (path: string) => path.split(/[\\/]/).filter(Boolean).pop() ?? path
 
 function wordsFor(isRtl: boolean) {
   return isRtl ? WORDS.he : WORDS.en
@@ -193,6 +195,11 @@ export function drawTree(els: Elements, view: View, m: Mission, layout: Layout, 
               </Text>
               <Box flexDirection="column" flexShrink={1} alignItems={align}>
                 <Box flexDirection={dir} gap={1} flexWrap="wrap">
+                  {item.code && (
+                    <Text color={isOpen ? 'suggestion' : undefined} dimColor={!isOpen} bold>
+                      {item.code}
+                    </Text>
+                  )}
                   <Text
                     bold={isStage}
                     color={TEXT_COLOR[shown]}
@@ -268,7 +275,10 @@ export function drawTree(els: Elements, view: View, m: Mission, layout: Layout, 
 
 export function drawList(els: Elements, view: View, layout: Layout, actions: PaneActions) {
   const { Box, Text, Button } = els
-  const active = view.index.filter(meta => meta.status === 'active').sort((a, b) => b.updatedAt - a.updatedAt)
+  const near = (meta: MissionMeta) => Number(meta.project === view.project)
+  const active = view.index
+    .filter(meta => meta.status === 'active')
+    .sort((a, b) => near(b) - near(a) || b.updatedAt - a.updatedAt)
   const archived = view.index
     .filter(meta => meta.status === 'archived')
     .sort((a, b) => b.updatedAt - a.updatedAt)
@@ -312,6 +322,7 @@ export function drawList(els: Elements, view: View, layout: Layout, actions: Pan
                 {MARK[mark]}
               </Text>
               <Text bold={isMine}>{meta.title}</Text>
+              {meta.project && meta.project !== view.project && <Text dimColor>· {projectName(meta.project)}</Text>}
               {Bar(els, meta.done, meta.total, width, isRtl)}
               <Text dimColor>
                 {meta.done}/{meta.total}

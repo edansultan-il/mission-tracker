@@ -34,20 +34,21 @@ const listModeAtom = atom({ plugin: 'mission-tracker', key: 'listMode' } as cons
 
 const GUIDANCE = `# Mission tracker
 
-The person tracks multi-step work in live mission trees (stages, tasks, subtasks) shown in a side pane. Several missions run side by side in this folder, one per chat, and a mission can be a sub-mission that delivers one item of a bigger parent mission. Keeping them accurate is part of your job: the person relies on them so nothing gets lost while plans change.
+The person tracks multi-step work in live mission trees (stages, tasks, subtasks) shown in a side pane. Missions are shared by every chat on this machine: several run side by side, each chat works on one, and a mission can be a sub-mission that delivers one item of a bigger parent mission. Keeping them accurate is part of your job: the person relies on them so nothing gets lost while plans change.
 
 Use the \`${TOOL}\` tool, batching several ops in one call:
-- Before starting a mission, read "Other active missions" below. If this chat's work belongs to one of them, join it. If it is one part of a bigger mission (one item of a package, say), start a sub-mission with parentMission and parentItem so it hangs under that item. Starting a mission never touches anyone else's.
+- Before starting a mission, read "Other active missions" below (or op "list"). If this chat's work belongs to one of them, join it by id. If it is one part of a bigger mission (one item of a package, say), start a sub-mission with parentMission and parentItem so it hangs under that item. Starting a mission never touches anyone else's.
 - When this chat has no mission and the work has roughly three or more steps, start or join one before doing the work.
 - The moment new work appears (a new stage, a subtask you discover, a follow-up the person mentions), add it under the right parent. Don't wait for the end of the turn.
 - Set an item to "doing" when you start it, "done" when it's finished and checked, "blocked" with a note saying why when it can't move.
 - When scope changes, set dropped items to "cancelled" instead of removing them. Use "remove" only to undo a mistake.
+- When the person numbers their stages ("E1", "4.1"), set that as the item's code; codes work anywhere an id does. Reorder with "move" (before / after / parent) instead of rebuilding, so ids stay stable.
 - Give items a due date (YYYY-MM-DD) and an owner when the person mentions them.
 - To change an item in another mission (the person says "E4 is done" and E4 lives in the parent), pass that mission's id or title as "mission" on the op.
 - Nest instead of making long flat lists. Keep titles short and in the person's language.
 - While a mission is attached, use it instead of the built-in todo or task tools for the same work.
 
-The person can tick items in the pane, and other chats update their own missions while you work, so the state below is always the current one.`
+The person can tick items in the pane, and other chats update missions while you work, so the state below is always the current one.`
 
 const INPUT_SCHEMA = {
   type: 'object',
@@ -60,22 +61,25 @@ const INPUT_SCHEMA = {
         properties: {
           op: {
             type: 'string',
-            enum: ['start', 'join', 'link', 'archive', 'restore', 'add', 'update', 'remove'],
+            enum: ['list', 'start', 'join', 'link', 'archive', 'restore', 'add', 'update', 'move', 'remove'],
             description:
-              'start: new mission for this chat (others are untouched). join: attach this chat to an existing mission. link: hang a mission under an item of a parent mission. archive / restore: put a mission away or bring it back. add / update / remove: items.',
+              'list: every mission on this machine with its id. start: new mission for this chat (others are untouched). join: attach this chat to an existing mission. link: hang a mission under an item of a parent mission. archive / restore: put a mission away or bring it back. add / update / move / remove: items.',
           },
           title: { type: 'string', description: 'start, add: the title. update: a new title.' },
           mission: {
             type: 'string',
-            description: "join, restore: the mission. archive, link, add, update, remove: a mission other than this chat's. An id or a title.",
+            description: "join, restore: the mission. archive, link, add, update, move, remove: a mission other than this chat's. An id or a title.",
           },
           parentMission: { type: 'string', description: 'start, link: the parent mission, by id or title.' },
-          parentItem: { type: ['integer', 'string'], description: 'start, link: the item of the parent this mission delivers, by id or title.' },
-          id: { type: ['integer', 'string'], description: 'update, remove: the item id (#7 → 7), or a ref from an earlier add in this call.' },
+          parentItem: { type: ['integer', 'string'], description: 'start, link: the item of the parent this mission delivers, by id, code or title.' },
+          id: { type: ['integer', 'string'], description: 'update, move, remove: the item, by id (#7 → 7), code ("E1"), title, or a ref from an earlier add in this call.' },
+          code: { type: 'string', description: 'add, update: the person\'s own number for the item ("E1", "4.1"), shown before the title. Empty string clears it.' },
           parent: {
             type: ['integer', 'string', 'null'],
-            description: 'add, update: the parent item id or a ref from an earlier add in this call; omit (or null on update) for top level.',
+            description: 'add, update, move: the parent item; omit (or null on update / move) for top level.',
           },
+          before: { type: ['integer', 'string'], description: 'add, update, move: place the item just before this sibling.' },
+          after: { type: ['integer', 'string'], description: 'add, update, move: place the item just after this sibling.' },
           ref: { type: 'string', description: 'add: a temporary name later ops in this call can use as parent or id.' },
           status: { type: 'string', enum: [...STATUSES] },
           note: { type: 'string', description: 'A short note (why blocked, what is left). Empty string clears it.' },
@@ -91,39 +95,73 @@ const INPUT_SCHEMA = {
 
 type $ = EngineInterface
 
-// Each mission is its own record, so chats working on different missions never write the same key.
-const key = {
-  index: (cwd: string) => `index:${cwd}`,
-  mission: (cwd: string, id: string) => `m:${cwd}:${id}`,
-  binding: (sessionId: string) => `bind:${sessionId}`,
-  legacyMission: (cwd: string) => `mission:${cwd}`,
-  legacyArchive: (cwd: string) => `archive:${cwd}`,
+// Each mission is one JSON file under the Claude config folder, and each chat's attachment another.
+// Every chat reads the files from disk, so all of them see the same missions, whatever folder or
+// worktree they run in; chats on different missions never write the same file.
+let rootDir: string | undefined
+
+async function root($: $): Promise<string> {
+  if (rootDir) return rootDir
+  const configured = await $.env.get('CLAUDE_CONFIG_DIR')
+  const home = (await $.env.get('HOME')) ?? (await $.env.get('USERPROFILE'))
+  const config = configured ?? (home ? `${home}/.claude` : '.claude')
+  rootDir = `${config.replace(/[\\/]+$/, '')}/mission-tracker`
+  return rootDir
 }
 
-async function getIndex($: $, cwd: string): Promise<MissionMeta[]> {
-  return ((await $.store.get(key.index(cwd))) as MissionMeta[] | undefined) ?? []
+const fileName = (id: string) => `${id.replace(/[^\w.-]/g, '_')}.json`
+
+async function readJson<T>($: $, path: string): Promise<T | null> {
+  try {
+    return JSON.parse(String(await $.fs.read(path))) as T
+  } catch {
+    return null
+  }
 }
 
-async function getMission($: $, cwd: string, id: string): Promise<Mission | null> {
-  return ((await $.store.get(key.mission(cwd, id))) as Mission | undefined) ?? null
+// Parsed mission files by name and modification time, so the sync re-reads only what changed.
+const parsed = new Map<string, { mtimeMs: number; mission: Mission }>()
+
+async function allMissions($: $): Promise<Mission[]> {
+  const dir = `${await root($)}/missions`
+  const entries = await $.fs.list(dir).catch(() => [])
+  const missions: Mission[] = []
+  for (const entry of entries) {
+    if (entry.kind !== 'file' || !entry.name.endsWith('.json')) continue
+    const hit = parsed.get(entry.name)
+    if (hit && hit.mtimeMs === entry.mtimeMs) {
+      missions.push(hit.mission)
+      continue
+    }
+    const m = await readJson<Mission>($, `${dir}/${entry.name}`)
+    if (m?.id) {
+      parsed.set(entry.name, { mtimeMs: entry.mtimeMs, mission: m })
+      missions.push(m)
+    }
+  }
+  return missions
 }
 
-async function putMission($: $, cwd: string, m: Mission): Promise<void> {
-  await $.store.set(key.mission(cwd, m.id), m)
-  const index = await getIndex($, cwd)
-  const meta = toMeta(m)
-  const at = index.findIndex(row => row.id === m.id)
-  if (at === -1) index.push(meta)
-  else index[at] = meta
-  await $.store.set(key.index(cwd), index)
+async function getIndex($: $): Promise<MissionMeta[]> {
+  return (await allMissions($)).map(toMeta)
+}
+
+// Writes go through a fresh read, never the cache.
+async function getMission($: $, id: string): Promise<Mission | null> {
+  return readJson<Mission>($, `${await root($)}/missions/${fileName(id)}`)
+}
+
+async function putMission($: $, m: Mission): Promise<void> {
+  parsed.delete(fileName(m.id))
+  await $.fs.write(`${await root($)}/missions/${fileName(m.id)}`, JSON.stringify(m, null, 1))
 }
 
 async function getBinding($: $, sessionId: string): Promise<Binding> {
-  return ((await $.store.get(key.binding(sessionId))) as Binding | undefined) ?? { mission: null, seenAt: 0 }
+  return (await readJson<Binding>($, `${await root($)}/chats/${fileName(sessionId)}`)) ?? { mission: null, seenAt: 0 }
 }
 
 async function putBinding($: $, sessionId: string, binding: Binding): Promise<void> {
-  await $.store.set(key.binding(sessionId), binding)
+  await $.fs.write(`${await root($)}/chats/${fileName(sessionId)}`, JSON.stringify(binding))
 }
 
 function newMissionId(now: number, taken: readonly MissionMeta[]): string {
@@ -134,48 +172,56 @@ function newMissionId(now: number, taken: readonly MissionMeta[]): string {
 
 type LegacyMission = Omit<Mission, 'id' | 'status' | 'updatedAt'> & { seenAt?: number; paneDismissed?: boolean }
 
-// v0.1 to v0.3 kept one mission per folder plus an archive list; each becomes a mission of its own.
-async function migrate($: $, cwd: string): Promise<void> {
-  const current = (await $.store.get(key.legacyMission(cwd))) as LegacyMission | undefined
-  const archived = ((await $.store.get(key.legacyArchive(cwd))) as LegacyMission[] | undefined) ?? []
-  if (!current && archived.length === 0) return
-
-  const index = await getIndex($, cwd)
-  const adopt = async (old: LegacyMission, status: Mission['status'], n: number) => {
-    const id = `m${old.startedAt.toString(36)}${n}`
-    if (index.some(meta => meta.id === id)) return
-    const { seenAt: _seen, paneDismissed: _dismissed, ...rest } = old
-    const m: Mission = { ...rest, id, status, updatedAt: old.startedAt }
-    await putMission($, cwd, m)
-    index.push(toMeta(m))
+// Earlier versions kept missions in this process's copy of the plugin store. Whatever this copy
+// holds moves to the shared files; a file already there wins unless this copy is newer.
+async function migrateFromStore($: $, sid: string, project: string): Promise<void> {
+  const keys = await $.store.keys()
+  const adopt = async (m: Mission) => {
+    const there = await getMission($, m.id)
+    if (!there || there.updatedAt < m.updatedAt) await putMission($, { project, ...m })
   }
-  for (const [n, old] of archived.entries()) await adopt(old, 'archived', n)
-  if (current) await adopt(current, 'active', archived.length)
-
-  await $.store.delete(key.legacyMission(cwd))
-  await $.store.delete(key.legacyArchive(cwd))
+  for (const k of keys) {
+    const value = await $.store.get(k)
+    if (k.startsWith('m:')) await adopt(value as Mission)
+    else if (k.startsWith('mission:')) {
+      const old = value as LegacyMission
+      const { seenAt: _s, paneDismissed: _p, ...rest } = old
+      await adopt({ ...rest, id: `m${old.startedAt.toString(36)}`, status: 'active', updatedAt: old.startedAt })
+    } else if (k.startsWith('archive:')) {
+      for (const [n, old] of (value as LegacyMission[]).entries()) {
+        const { seenAt: _s, paneDismissed: _p, ...rest } = old
+        await adopt({ ...rest, id: `m${old.startedAt.toString(36)}a${n}`, status: 'archived', updatedAt: old.startedAt })
+      }
+    }
+  }
+  const mine = (await $.store.get(`bind:${sid}`)) as Binding | undefined
+  const chatFile = `${await root($)}/chats/${fileName(sid)}`
+  if (mine && !(await $.fs.exists(chatFile))) await putBinding($, sid, mine)
 }
 
-// The folder and chat this copy serves; session.start sets both and fires again on every reload.
-let projectDir: string | undefined
+// The chat this copy serves; set once per load of the module (a reload starts it over).
 let sessionId: string | undefined
+let project = ''
+let isRegistered = false
+let isSyncing = false
 
-async function here($: $): Promise<{ cwd: string; sid: string }> {
-  projectDir ??= await $.session.cwd()
+async function here($: $): Promise<{ sid: string }> {
   sessionId ??= await $.session.id()
-  return { cwd: projectDir, sid: sessionId }
+  return { sid: sessionId }
 }
+
+const projectName = (path: string) => path.split(/[\\/]/).filter(Boolean).pop() ?? path
 
 async function loadView($: $): Promise<View> {
-  const { cwd, sid } = await here($)
+  const { sid } = await here($)
   const binding = await getBinding($, sid)
-  const index = await getIndex($, cwd)
-  const bound = binding.mission ? await getMission($, cwd, binding.mission) : null
+  const missions = await allMissions($)
+  const byId = new Map(missions.map(m => [m.id, m]))
+  const bound = binding.mission ? (byId.get(binding.mission) ?? null) : null
   const mission = bound?.status === 'active' ? bound : null
-  const parent = mission?.parent ? await getMission($, cwd, mission.parent.mission) : null
-  const kids = mission ? index.filter(meta => meta.status === 'active' && meta.parent?.mission === mission.id) : []
-  const children = (await Promise.all(kids.map(meta => getMission($, cwd, meta.id)))).filter((m): m is Mission => m !== null)
-  return { binding, mission, parent, children, index }
+  const parent = mission?.parent ? (byId.get(mission.parent.mission) ?? null) : null
+  const children = mission ? missions.filter(m => m.status === 'active' && m.parent?.mission === mission.id) : []
+  return { project, binding, mission, parent, children, index: missions.map(toMeta) }
 }
 
 function statusLine(view: View): string | undefined {
@@ -188,7 +234,7 @@ function statusLine(view: View): string | undefined {
   return `🎯 ${trail}${m.title.slice(0, 40)} · ${p.done}/${p.total}${now}`
 }
 
-// Reads the store and redraws only when something changed, here or in another chat.
+// Reads the files and redraws only when something changed, here or in another chat.
 async function refresh($: $): Promise<View> {
   const view = await loadView($)
   const shown = await read($, viewAtom)
@@ -199,6 +245,36 @@ async function refresh($: $): Promise<View> {
   return view
 }
 
+// Registers the tool and the command, migrates and starts the sync, once per load of the module.
+// session.start does it first; a reload that skips session.start gets it on the next prompt.
+async function ensureStarted($: $, cwd?: string): Promise<void> {
+  if (isRegistered) return
+  isRegistered = true
+  const { sid } = await here($)
+  const repo = await $.session.repo().catch(() => null)
+  project = repo?.root ?? cwd ?? (await $.session.cwd())
+  await migrateFromStore($, sid, project)
+
+  await $.tool.register({
+    name: 'mission',
+    description:
+      "Keep the mission trees the person watches in their side pane up to date: list missions, start or join this chat's mission (or a sub-mission under an item of a bigger one), add, move and update items as work appears, and set statuses, codes, due dates and owners. Returns the updated tree.",
+    inputSchema: INPUT_SCHEMA,
+    isDeferred: false,
+  })
+  await $.command.register({
+    name: 'mission',
+    description: 'Show the mission pane, or: new · join · list · report · add · show · archive · restore',
+    argumentHint: '[new <title> | join <name> | list | report | add <task> | show | archive | restore <name>]',
+  })
+  // Other chats write missions too; pick their changes up while this one is open.
+  if (!isSyncing) {
+    isSyncing = true
+    $.clock.every(SYNC_MS, () => void refresh($))
+  }
+  await refresh($)
+}
+
 // The pane stays up for an unfinished mission until the person closes it themselves.
 async function keepOpen($: $): Promise<void> {
   const view = (await read($, viewAtom)) ?? (await refresh($))
@@ -206,20 +282,20 @@ async function keepOpen($: $): Promise<void> {
   await $.ui.open({ id: PANE, title: 'Mission' })
 }
 
-async function changeBinding($: $, change: Partial<View['binding']>): Promise<void> {
+async function changeBinding($: $, change: Partial<Binding>): Promise<void> {
   const { sid } = await here($)
   await putBinding($, sid, { ...(await getBinding($, sid)), ...change })
 }
 
 // A sub-mission's progress shows on the item it delivers: started reads doing, finished ticks it.
-async function syncParent($: $, cwd: string, child: Mission, now: number): Promise<void> {
+async function syncParent($: $, child: Mission, now: number): Promise<void> {
   if (!child.parent) return
-  const parent = await getMission($, cwd, child.parent.mission)
+  const parent = await getMission($, child.parent.mission)
   const item = parent?.items.find(one => one.id === child.parent!.item)
   if (!parent || !item || item.status === 'cancelled') return
   const want = isComplete(child) ? 'done' : hasStarted(child) && item.status === 'todo' ? 'doing' : null
   if (want === null || item.status === want) return
-  await putMission($, cwd, {
+  await putMission($, {
     ...parent,
     updatedAt: now,
     items: parent.items.map(one => (one.id === item.id ? { ...one, status: want } : one)),
@@ -228,21 +304,22 @@ async function syncParent($: $, cwd: string, child: Mission, now: number): Promi
 }
 
 async function changeMission($: $, id: string, change: (m: Mission) => Mission): Promise<Mission | null> {
-  const { cwd } = await here($)
-  const m = await getMission($, cwd, id)
+  const m = await getMission($, id)
   if (m === null) return null
   const now = await $.clock.now()
   const next = { ...change(m), updatedAt: now }
-  await putMission($, cwd, next)
-  await syncParent($, cwd, next, now)
+  await putMission($, next)
+  await syncParent($, next, now)
   return next
 }
 
 function findItem(m: Mission, key: number | string | undefined): Item | undefined {
   if (key === undefined || key === '') return undefined
-  const asNumber = Number(String(key).replace(/^#/, ''))
-  if (Number.isInteger(asNumber)) return m.items.find(item => item.id === asNumber)
   const q = String(key).trim().toLowerCase()
+  const byCode = m.items.find(item => item.code?.toLowerCase() === q)
+  if (byCode) return byCode
+  const asNumber = Number(q.replace(/^#/, ''))
+  if (Number.isInteger(asNumber)) return m.items.find(item => item.id === asNumber)
   return m.items.find(item => item.title.toLowerCase() === q) ?? m.items.find(item => item.title.toLowerCase().includes(q))
 }
 
@@ -255,10 +332,24 @@ function childBadges(view: View): Map<number, ChildBadge> {
 function outline(m: Mission): string {
   const lines: string[] = []
   walk(m, (item, depth) => {
-    lines.push(`${'  '.repeat(depth)}${GLYPH[effectiveStatus(m, item)]} #${item.id} ${item.title}`)
+    lines.push(`${'  '.repeat(depth)}${GLYPH[effectiveStatus(m, item)]} #${item.id} ${item.code ? `[${item.code}] ` : ''}${item.title}`)
     return depth < 1
   })
   return lines.join('\n')
+}
+
+// Missions of this chat's project first, then the newest; the model sees the first 25.
+function ranked(index: readonly MissionMeta[]): MissionMeta[] {
+  return [...index].sort((a, b) => {
+    const near = Number(b.project === project) - Number(a.project === project)
+    return near !== 0 ? near : b.updatedAt - a.updatedAt
+  })
+}
+
+function missionRow(meta: MissionMeta, mine: string | null | undefined): string {
+  const where = meta.project && meta.project !== project ? `  · ${projectName(meta.project)}` : ''
+  const under = meta.parent ? `  ↳ sub-mission of ${meta.parent.mission} #${meta.parent.item}` : ''
+  return `${meta.id === mine ? '▸' : '-'} ${meta.id} "${meta.title}" ${meta.done}/${meta.total}${under}${where}`
 }
 
 function context(view: View): string {
@@ -278,11 +369,10 @@ function context(view: View): string {
     })
     parts.push(`## Sub-missions\n${rows.join('\n')}`)
   }
-  const others = view.index.filter(meta => meta.status === 'active' && meta.id !== view.mission?.id)
-  const rows = others.map(
-    meta => `- ${meta.id} "${meta.title}" ${meta.done}/${meta.total}${meta.parent ? ` (sub-mission of ${meta.parent.mission} #${meta.parent.item})` : ''}`,
-  )
-  parts.push(`## Other active missions in this folder\n${rows.length ? rows.join('\n') : '(none)'}`)
+  const others = ranked(view.index.filter(meta => meta.status === 'active' && meta.id !== view.mission?.id))
+  const rows = others.slice(0, 25).map(meta => missionRow(meta, null))
+  const more = others.length > 25 ? `\n(${others.length - 25} more: op "list")` : ''
+  parts.push(`## Other active missions\n${rows.length ? rows.join('\n') : '(none)'}${more}`)
   return parts.join('\n\n')
 }
 
@@ -294,7 +384,7 @@ function report(view: View): string {
     : { done: 'Done', doing: 'In progress', blocked: 'Blocked', next: 'Next up', none: 'none' }
   const leaves = m.items.filter(item => !m.items.some(other => other.parent === item.id))
   const line = (item: Item) =>
-    `  - ${item.title}${item.due ? ` (${formatDue(item.due)})` : ''}${item.owner ? ` @${item.owner}` : ''}${item.note ? ` · ${item.note}` : ''}`
+    `  - ${item.code ? `${item.code} ` : ''}${item.title}${item.due ? ` (${formatDue(item.due)})` : ''}${item.owner ? ` @${item.owner}` : ''}${item.note ? ` · ${item.note}` : ''}`
   const group = (title: string, items: Item[]) => `${title}:\n${items.length ? items.map(line).join('\n') : `  ${label.none}`}`
   const p = progress(m)
   return [
@@ -307,16 +397,15 @@ function report(view: View): string {
 }
 
 function listText(view: View): string {
-  const row = (meta: View['index'][number]) =>
-    `${meta.id === view.mission?.id ? '▸' : ' '} ${meta.title}  ${meta.done}/${meta.total}  [${meta.id}]${meta.parent ? `  ↳ under ${meta.parent.mission} #${meta.parent.item}` : ''}`
-  const active = view.index.filter(meta => meta.status === 'active')
-  const archived = view.index.filter(meta => meta.status === 'archived')
+  const all = ranked(view.index)
+  const active = all.filter(meta => meta.status === 'active')
+  const archived = all.filter(meta => meta.status === 'archived')
   return [
     'Active missions:',
-    ...(active.length ? active.map(row) : ['  (none)']),
-    ...(archived.length ? ['', 'Archived:', ...archived.map(row)] : []),
+    ...(active.length ? active.map(meta => missionRow(meta, view.mission?.id)) : ['  (none)']),
+    ...(archived.length ? ['', 'Archived:', ...archived.map(meta => missionRow(meta, view.mission?.id))] : []),
     '',
-    'Use /mission join <name> or /mission restore <name>.',
+    'Join one with /mission join <id or title>, or bring one back with /mission restore <id or title>.',
   ].join('\n')
 }
 
@@ -349,46 +438,30 @@ export const register: Register = on => {
   let addedThisTurn = 0
 
   on('session.start', async ($, e, next) => {
-    projectDir = e.cwd
-    sessionId = await $.session.id()
-    await migrate($, e.cwd)
-
-    await $.tool.register({
-      name: 'mission',
-      description:
-        "Keep the mission trees the person watches in their side pane up to date: start or join this chat's mission (or a sub-mission under an item of a bigger one), add items as work appears, and set statuses, due dates and owners as you go. Returns the updated tree.",
-      inputSchema: INPUT_SCHEMA,
-      isDeferred: false,
-    })
-    await $.command.register({
-      name: 'mission',
-      description: 'Show the mission pane, or: new · join · list · report · add · show · archive · restore',
-      argumentHint: '[new <title> | join <name> | list | report | add <task> | show | archive | restore <name>]',
-    })
-
-    await refresh($)
+    sessionId = undefined
+    isRegistered = false
+    await ensureStarted($, e.cwd)
     if (e.isInteractive) void keepOpen($)
-    // Other chats write their own missions; pick their changes up while this one is open.
-    $.clock.every(SYNC_MS, () => void refresh($))
-
     return next(e)
   })
 
   on('tool.call', { tool: TOOL }, async ($, e) => {
+    await ensureStarted($)
     const ops = ((e as unknown as { ops?: Op[] }).ops ?? []).filter(op => op && typeof op.op === 'string')
     if (ops.length === 0) return { result: 'No ops given. Pass { ops: [...] }.' }
 
-    const { cwd, sid } = await here($)
+    const { sid } = await here($)
     const now = await $.clock.now()
     const notes: string[] = []
     const errors: string[] = []
     const touched = new Set<string>()
     const refs = new Map<string, Map<string, number>>()
+    let wantsList = false
 
     const resolveParent = async (missionQuery: string, itemKey: number | string | undefined, at: string) => {
-      const meta = findMission(await getIndex($, cwd), missionQuery)
-      const parent = meta ? await getMission($, cwd, meta.id) : null
-      if (!parent) return void errors.push(`${at}: no mission matches "${missionQuery}"`)
+      const meta = findMission(await getIndex($), missionQuery)
+      const parent = meta ? await getMission($, meta.id) : null
+      if (!parent) return void errors.push(`${at}: no mission matches "${missionQuery}" (op "list" shows them all)`)
       const item = findItem(parent, itemKey)
       if (!item) return void errors.push(`${at}: no item "${String(itemKey)}" in ${parent.title}`)
       return { parent, item }
@@ -398,12 +471,21 @@ export const register: Register = on => {
       const at = `op ${n + 1} (${op.op})`
       const binding = await getBinding($, sid)
 
+      if (op.op === 'list') {
+        wantsList = true
+        continue
+      }
+
       if (ITEM_OPS.has(op.op)) {
         const itemOp = op as ItemOp
-        const target = itemOp.mission ? findMission(await getIndex($, cwd), itemOp.mission)?.id : (binding.mission ?? undefined)
-        const m = target ? await getMission($, cwd, target) : null
+        const target = itemOp.mission ? findMission(await getIndex($), itemOp.mission)?.id : (binding.mission ?? undefined)
+        const m = target ? await getMission($, target) : null
         if (!m) {
-          errors.push(itemOp.mission ? `${at}: no mission matches "${itemOp.mission}"` : `${at}: this chat has no mission yet; start or join one first`)
+          errors.push(
+            itemOp.mission
+              ? `${at}: no mission matches "${itemOp.mission}" (op "list" shows them all)`
+              : `${at}: this chat has no mission yet; start or join one first`,
+          )
           continue
         }
         const names = refs.get(m.id) ?? new Map<string, number>()
@@ -411,13 +493,13 @@ export const register: Register = on => {
         const result = applyItemOps(m, [itemOp], now, names)
         errors.push(...result.errors.map(err => err.replace(/^op 1 \(\w+\)/, at)))
         addedThisTurn += result.added
-        await putMission($, cwd, result.mission)
-        await syncParent($, cwd, result.mission, now)
+        await putMission($, result.mission)
+        await syncParent($, result.mission, now)
         if (m.id !== binding.mission) touched.add(m.id)
         continue
       }
 
-      const mop = op as MissionOp
+      const mop = op as Exclude<MissionOp, { op: 'list' }>
       if (mop.op === 'start') {
         if (!mop.title?.trim()) {
           errors.push(`${at}: a title is required`)
@@ -425,9 +507,9 @@ export const register: Register = on => {
         }
         const link = mop.parentMission ? await resolveParent(mop.parentMission, mop.parentItem, at) : undefined
         if (mop.parentMission && !link) continue
-        const m = newMission(newMissionId(now, await getIndex($, cwd)), mop.title, now)
+        const m: Mission = { ...newMission(newMissionId(now, await getIndex($)), mop.title, now), project }
         if (link) m.parent = { mission: link.parent.id, item: link.item.id }
-        await putMission($, cwd, m)
+        await putMission($, m)
         await changeBinding($, { mission: m.id, paneDismissed: false })
         notes.push(
           `Started ${m.id} "${m.title}"${link ? ` as the sub-mission for #${link.item.id} "${link.item.title}" of "${link.parent.title}"` : ''}. Other missions are untouched.`,
@@ -435,10 +517,12 @@ export const register: Register = on => {
         continue
       }
 
-      const meta = mop.op === 'archive' && !mop.mission ? undefined : findMission(await getIndex($, cwd), mop.mission ?? '')
+      const meta = mop.op === 'archive' && !mop.mission ? undefined : findMission(await getIndex($), mop.mission ?? '')
       const targetId = meta?.id ?? (mop.op === 'archive' || mop.op === 'link' ? binding.mission : null)
       if (!targetId) {
-        errors.push(`${at}: ${mop.op === 'join' || mop.op === 'restore' ? `no mission matches "${mop.mission ?? ''}"` : 'this chat has no mission'}`)
+        errors.push(
+          `${at}: ${mop.op === 'join' || mop.op === 'restore' ? `no mission matches "${mop.mission ?? ''}" (op "list" shows them all)` : 'this chat has no mission'}`,
+        )
         continue
       }
 
@@ -472,10 +556,11 @@ export const register: Register = on => {
     const view = await refresh($)
     void keepOpen($)
 
-    const others = await Promise.all([...touched].filter(id => id !== view.mission?.id).map(id => getMission($, cwd, id)))
+    const others = await Promise.all([...touched].filter(id => id !== view.mission?.id).map(id => getMission($, id)))
     const sections = [
       renderText(view.mission, childBadges(view)),
       ...others.flatMap(m => (m ? [`Also updated:\n${renderText(m)}`] : [])),
+      ...(wantsList ? [listText(view)] : []),
       ...(notes.length ? [notes.join('\n')] : []),
       ...(errors.length ? [`Not applied:\n- ${errors.join('\n- ')}`] : []),
     ]
@@ -483,13 +568,15 @@ export const register: Register = on => {
   })
 
   on('prompt.compose', async ($, e, next) => {
+    await ensureStarted($)
     const composed = await next(e)
     const view = await refresh($)
-    const text = `${GUIDANCE}\n\nMarks: [ ] todo, [~] doing, [x] done, [!] blocked, [-] cancelled. Item ids are stable within a mission.\n\n${context(view)}`
+    const text = `${GUIDANCE}\n\nMarks: [ ] todo, [~] doing, [x] done, [!] blocked, [-] cancelled. Item ids are stable within a mission; [E1] is the item's code.\n\n${context(view)}`
     return { sections: [...composed.sections, { id: 'mission-tracker:mission', text, scope: 'session' as const }] }
   })
 
   on('prompt.submit', async ($, e, next) => {
+    await ensureStarted($)
     addedThisTurn = 0
     await changeBinding($, { seenAt: await $.clock.now() })
     await refresh($)
@@ -516,9 +603,9 @@ export const register: Register = on => {
   })
 
   on('command.run', { command: 'mission' }, async ($, e) => {
+    await ensureStarted($)
     const [verb = '', ...rest] = e.args.trim().split(/\s+/)
     const arg = rest.join(' ').trim()
-    const { cwd } = await here($)
     const now = await $.clock.now()
     const view = await refresh($)
     const open = async () => {
@@ -531,8 +618,8 @@ export const register: Register = on => {
     switch (verb) {
       case 'new': {
         if (!arg) return { text: 'Usage: /mission new <title>' }
-        const m = newMission(newMissionId(now, view.index), arg, now)
-        await putMission($, cwd, m)
+        const m: Mission = { ...newMission(newMissionId(now, view.index), arg, now), project }
+        await putMission($, m)
         await changeBinding($, { mission: m.id })
         await open()
         return {

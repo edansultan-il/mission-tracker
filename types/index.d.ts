@@ -4,6 +4,8 @@ export type Item = {
   id: number
   parent: number | null
   title: string
+  // The person's own numbering ("E1", "4.1"); shown before the title and accepted wherever an id is.
+  code?: string
   status: ItemStatus
   note?: string
   // YYYY-MM-DD
@@ -24,6 +26,8 @@ export type Mission = {
   nextId: number
   items: Item[]
   parent?: ParentLink
+  // The repository (or folder) it was started in, for grouping; missions themselves are account-wide.
+  project?: string
 }
 
 // The index row the "All missions" view and the model's overview read.
@@ -32,6 +36,7 @@ export type MissionMeta = {
   title: string
   status: 'active' | 'archived'
   parent?: ParentLink
+  project?: string
   done: number
   total: number
   updatedAt: number
@@ -45,6 +50,8 @@ export type Binding = {
 }
 
 export type View = {
+  // This chat's repository root (or folder), to group the list and rank nearby missions first.
+  project: string
   binding: Binding
   mission: Mission | null
   parent: Mission | null

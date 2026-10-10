@@ -17,21 +17,35 @@ export type ItemOp =
       title: string
       parent?: number | string
       ref?: string
+      code?: string
       status?: ItemStatus
       note?: string
       due?: string
       owner?: string
+      before?: number | string
+      after?: number | string
       mission?: string
     }
   | {
       op: 'update'
       id: number | string
       title?: string
+      code?: string
       status?: ItemStatus
       note?: string
       due?: string
       owner?: string
       parent?: number | string | null
+      before?: number | string
+      after?: number | string
+      mission?: string
+    }
+  | {
+      op: 'move'
+      id: number | string
+      parent?: number | string | null
+      before?: number | string
+      after?: number | string
       mission?: string
     }
   | { op: 'remove'; id: number | string; mission?: string }
@@ -42,10 +56,11 @@ export type MissionOp =
   | { op: 'link'; parentMission: string; parentItem: number | string; mission?: string }
   | { op: 'archive'; mission?: string }
   | { op: 'restore'; mission: string }
+  | { op: 'list' }
 
 export type Op = ItemOp | MissionOp
 
-export const ITEM_OPS = new Set(['add', 'update', 'remove'])
+export const ITEM_OPS = new Set(['add', 'update', 'move', 'remove'])
 
 export function newMission(id: string, title: string, now: number): Mission {
   return { id, title: title.trim(), status: 'active', startedAt: now, updatedAt: now, nextId: 1, items: [] }
@@ -131,6 +146,7 @@ export function toMeta(m: Mission): MissionMeta {
     title: m.title,
     status: m.status,
     ...(m.parent ? { parent: m.parent } : {}),
+    ...(m.project ? { project: m.project } : {}),
     done: p.done,
     total: p.total,
     updatedAt: m.updatedAt,
@@ -187,7 +203,8 @@ export function renderText(m: Mission | null, childByItem: ReadonlyMap<number, C
     ].filter(Boolean)
     const tail = extras.length ? `  (${extras.join(', ')})` : ''
     const note = item.note ? `  // ${item.note}` : ''
-    lines.push(`${'  '.repeat(depth)}${GLYPH[effectiveStatus(m, item)]} #${item.id} ${item.title}${tail}${note}`)
+    const code = item.code ? `[${item.code}] ` : ''
+    lines.push(`${'  '.repeat(depth)}${GLYPH[effectiveStatus(m, item)]} #${item.id} ${code}${item.title}${tail}${note}`)
   })
   if (m.items.length === 0) lines.push('(no tasks yet)')
   return lines.join('\n')
@@ -213,6 +230,8 @@ export function applyItemOps(
     if (typeof key === 'number') return m.items.some(item => item.id === key) ? key : undefined
     const fromRef = refs.get(key)
     if (fromRef !== undefined) return fromRef
+    const byCode = m.items.find(item => item.code !== undefined && item.code.toLowerCase() === key.trim().toLowerCase())
+    if (byCode) return byCode.id
     const asNumber = Number(String(key).replace(/^#/, ''))
     if (Number.isInteger(asNumber)) return m.items.some(item => item.id === asNumber) ? asNumber : undefined
     // A title works too ("E4"): an exact match first, then the one title that contains it.
@@ -222,7 +241,14 @@ export function applyItemOps(
     return exact?.id ?? (partial.length === 1 ? partial[0]?.id : undefined)
   }
 
-  const setExtras = (item: Item, op: { note?: string; due?: string; owner?: string }, where: string) => {
+  const setExtras = (item: Item, op: { code?: string; note?: string; due?: string; owner?: string }, where: string) => {
+    if (op.code !== undefined) {
+      const code = op.code.trim()
+      if (code === '') delete item.code
+      else if (m.items.some(other => other !== item && other.code?.toLowerCase() === code.toLowerCase())) {
+        errors.push(`${where}: code "${code}" is already used in ${m.id}`)
+      } else item.code = code
+    }
     if (op.note !== undefined) {
       if (op.note === '') delete item.note
       else item.note = op.note
@@ -241,6 +267,30 @@ export function applyItemOps(
     }
   }
 
+  // Moves an item next to a sibling (before / after) or to the end of a new parent's children.
+  const place = (id: number, op: { parent?: number | string | null; before?: number | string; after?: number | string }, where: string) => {
+    const item = m.items.find(one => one.id === id)!
+    const anchorKey = op.before ?? op.after
+    if (anchorKey !== undefined) {
+      const anchorId = resolve(anchorKey)
+      if (anchorId === undefined || anchorId === null) return void errors.push(`${where}: no item ${String(anchorKey)} in ${m.id}`)
+      if (anchorId === id || descendantIds(m, id).has(anchorId)) return void errors.push(`${where}: #${id} cannot move next to itself or inside its own subtree`)
+      const anchor = m.items.find(one => one.id === anchorId)!
+      item.parent = anchor.parent
+      m.items = m.items.filter(one => one.id !== id)
+      const at = m.items.findIndex(one => one.id === anchorId)
+      m.items.splice(op.before !== undefined ? at : at + 1, 0, item)
+      return
+    }
+    if (op.parent !== undefined) {
+      const parent = resolve(op.parent)
+      if (parent === undefined) return void errors.push(`${where}: no item ${String(op.parent)} in ${m.id}`)
+      if (parent !== null && descendantIds(m, id).has(parent)) return void errors.push(`${where}: #${id} cannot move under its own subtree`)
+      item.parent = parent
+      m.items = [...m.items.filter(one => one.id !== id), item]
+    }
+  }
+
   ops.forEach((op, index) => {
     const where = `op ${index + 1} (${op.op})`
 
@@ -254,6 +304,7 @@ export function applyItemOps(
       setExtras(item, op, where)
       m.items.push(item)
       if (op.ref) refs.set(op.ref, item.id)
+      if (op.before !== undefined || op.after !== undefined) place(item.id, { before: op.before, after: op.after }, where)
       added += 1
       return
     }
@@ -267,6 +318,13 @@ export function applyItemOps(
       return
     }
 
+    if (op.op === 'move') {
+      if (op.parent === undefined && op.before === undefined && op.after === undefined) {
+        return void errors.push(`${where}: say where: parent, before or after`)
+      }
+      return place(id, op, where)
+    }
+
     const item = m.items.find(one => one.id === id)!
     if (op.status !== undefined) {
       if (!STATUSES.includes(op.status)) return void errors.push(`${where}: unknown status ${op.status}`)
@@ -274,14 +332,7 @@ export function applyItemOps(
     }
     if (op.title?.trim()) item.title = op.title.trim()
     setExtras(item, op, where)
-    if (op.parent !== undefined) {
-      const parent = resolve(op.parent)
-      if (parent === undefined) return void errors.push(`${where}: no item ${String(op.parent)} in ${m.id}`)
-      if (parent !== null && descendantIds(m, id).has(parent)) {
-        return void errors.push(`${where}: #${id} cannot move under its own subtree`)
-      }
-      item.parent = parent
-    }
+    if (op.parent !== undefined || op.before !== undefined || op.after !== undefined) place(id, op, where)
   })
 
   m.updatedAt = now
