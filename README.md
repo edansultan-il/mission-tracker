@@ -9,7 +9,7 @@ A Claude Code mod that keeps live mission trees (stages, tasks, subtasks) in a s
 - **Claude keeps it current.** It adds stages and subtasks the moment they come up, sets statuses as it works, and can update an item in another mission ("E4 is done").
 - **Your own numbering.** Give items codes like `E1` or `4.1`; they show before the title and work anywhere an id does. Reorder with a move instead of rebuilding, so ids stay put.
 - **A clean pane.** Progress bar, the task in progress, colored status marks with a legend, due dates (red when overdue), owners, finished stages folded to one line, and right-to-left layout for Hebrew missions.
-- **All missions view.** Every active mission in the folder, sub-missions nested under their parents, with buttons to open one here or restore an archived one.
+- **All missions view.** Every active mission on your computer (this project's first), sub-missions nested under their parents, with buttons to open one here or restore an archived one.
 - **Stays open** while a mission is unfinished, until you close the pane yourself.
 
 Status marks: `○` to do · `◐` in progress · `✓` done · `!` blocked · `✕` dropped
